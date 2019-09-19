@@ -16,6 +16,8 @@
 
 package com.android.internal.telephony.dataconnection;
 
+import static android.text.format.DateUtils.MINUTE_IN_MILLIS;
+
 import android.annotation.NonNull;
 import android.app.AppOpsManager;
 import android.content.BroadcastReceiver;
@@ -39,6 +41,7 @@ import android.os.ServiceManager;
 import android.os.UserHandle;
 import android.telephony.AccessNetworkConstants;
 import android.telephony.AccessNetworkConstants.TransportType;
+import android.telephony.AnomalyReporter;
 import android.telephony.CarrierConfigManager;
 import android.telephony.Rlog;
 import android.telephony.data.DataCallResponse;
@@ -55,6 +58,7 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 
 /**
@@ -67,6 +71,10 @@ public class DataServiceManager extends Handler {
     static final String DATA_CALL_RESPONSE = "data_call_response";
 
     private static final int EVENT_BIND_DATA_SERVICE = 1;
+
+    private static final int EVENT_WATCHDOG_TIMEOUT = 2;
+
+    private static final long REQUEST_UNRESPONDED_TIMEOUT = 10 * MINUTE_IN_MILLIS; // 10 mins
 
     private final Phone mPhone;
 
@@ -171,18 +179,19 @@ public class DataServiceManager extends Handler {
                 service.linkToDeath(mDeathRecipient, 0);
                 mIDataService.createDataServiceProvider(mPhone.getPhoneId());
                 mIDataService.registerForDataCallListChanged(mPhone.getPhoneId(),
-                        new CellularDataServiceCallback());
+                        new CellularDataServiceCallback("dataCallListChanged"));
             } catch (RemoteException e) {
                 mDeathRecipient.binderDied();
                 loge("Remote exception. " + e);
                 return;
             }
-
+            removeMessages(EVENT_WATCHDOG_TIMEOUT);
             mServiceBindingChangedRegistrants.notifyResult(true);
         }
         @Override
         public void onServiceDisconnected(ComponentName name) {
             if (DBG) log("onServiceDisconnected");
+            removeMessages(EVENT_WATCHDOG_TIMEOUT);
             mIDataService.asBinder().unlinkToDeath(mDeathRecipient, 0);
             mIDataService = null;
             mBound = false;
@@ -192,6 +201,17 @@ public class DataServiceManager extends Handler {
     }
 
     private final class CellularDataServiceCallback extends IDataServiceCallback.Stub {
+
+        private final String mTag;
+
+        CellularDataServiceCallback(String tag) {
+            mTag = tag;
+        }
+
+        public String getTag() {
+            return mTag;
+        }
+
         @Override
         public void onSetupDataCallComplete(@DataServiceCallback.ResultCode int resultCode,
                                             DataCallResponse response) {
@@ -199,6 +219,7 @@ public class DataServiceManager extends Handler {
                 log("onSetupDataCallComplete. resultCode = " + resultCode + ", response = "
                         + response);
             }
+            removeMessages(EVENT_WATCHDOG_TIMEOUT, CellularDataServiceCallback.this);
             Message msg = mMessageMap.remove(asBinder());
             if (msg != null) {
                 msg.getData().putParcelable(DATA_CALL_RESPONSE, response);
@@ -211,6 +232,7 @@ public class DataServiceManager extends Handler {
         @Override
         public void onDeactivateDataCallComplete(@DataServiceCallback.ResultCode int resultCode) {
             if (DBG) log("onDeactivateDataCallComplete. resultCode = " + resultCode);
+            removeMessages(EVENT_WATCHDOG_TIMEOUT, CellularDataServiceCallback.this);
             Message msg = mMessageMap.remove(asBinder());
             sendCompleteMessage(msg, resultCode);
         }
@@ -279,16 +301,40 @@ public class DataServiceManager extends Handler {
             case EVENT_BIND_DATA_SERVICE:
                 bindDataService();
                 break;
+            case EVENT_WATCHDOG_TIMEOUT:
+                handleRequestUnresponded((CellularDataServiceCallback) msg.obj);
+                break;
             default:
                 loge("Unhandled event " + msg.what);
         }
     }
 
+    private void handleRequestUnresponded(CellularDataServiceCallback callback) {
+        String message = "Request " + callback.getTag() + " unresponded on transport "
+                + AccessNetworkConstants.transportTypeToString(mTransportType) + " in "
+                + REQUEST_UNRESPONDED_TIMEOUT / 1000 + " seconds.";
+        log(message);
+        // Using fixed UUID to avoid duplicate bugreport notification
+        AnomalyReporter.reportAnomaly(
+                UUID.fromString("f5d5cbe6-9bd6-4009-b764-42b1b649b1de"),
+                message);
+    }
+
     private void bindDataService() {
+        Intent intent = null;
         String packageName = getDataServicePackageName();
+        String className = getDataServiceClassName();
         if (TextUtils.isEmpty(packageName)) {
             loge("Can't find the binding package");
             return;
+        }
+
+        if (TextUtils.isEmpty(className)) {
+            intent = new Intent(DataService.SERVICE_INTERFACE);
+            intent.setPackage(packageName);
+        } else {
+            ComponentName cm = new ComponentName(packageName, className);
+            intent = new Intent(DataService.SERVICE_INTERFACE).setComponent(cm);
         }
 
         if (TextUtils.equals(packageName, mTargetBindingPackageName)) {
@@ -316,9 +362,7 @@ public class DataServiceManager extends Handler {
         try {
             mServiceConnection = new CellularDataServiceConnection();
             if (!mPhone.getContext().bindService(
-                    new Intent(DataService.SERVICE_INTERFACE).setPackage(packageName),
-                    mServiceConnection,
-                    Context.BIND_AUTO_CREATE)) {
+                    intent, mServiceConnection, Context.BIND_AUTO_CREATE)) {
                 loge("Cannot bind to the data service.");
                 return;
             }
@@ -399,6 +443,55 @@ public class DataServiceManager extends Handler {
         return packageName;
     }
 
+    /**
+     * Get the data service class name for our current transport type.
+     *
+     * @return class name of the data service package for the the current transportType.
+     */
+    private String getDataServiceClassName() {
+        return getDataServiceClassName(mTransportType);
+    }
+
+
+    /**
+     * Get the data service class by transport type.
+     *
+     * @param transportType either WWAN or WLAN
+     * @return class name of the data service package for the specified transportType.
+     */
+    private String getDataServiceClassName(int transportType) {
+        String className;
+        int resourceId;
+        String carrierConfig;
+        switch (transportType) {
+            case AccessNetworkConstants.TRANSPORT_TYPE_WWAN:
+                resourceId = com.android.internal.R.string.config_wwan_data_service_class;
+                carrierConfig = CarrierConfigManager
+                        .KEY_CARRIER_DATA_SERVICE_WWAN_CLASS_OVERRIDE_STRING;
+                break;
+            case AccessNetworkConstants.TRANSPORT_TYPE_WLAN:
+                resourceId = com.android.internal.R.string.config_wlan_data_service_class;
+                carrierConfig = CarrierConfigManager
+                        .KEY_CARRIER_DATA_SERVICE_WLAN_CLASS_OVERRIDE_STRING;
+                break;
+            default:
+                throw new IllegalStateException("Transport type not WWAN or WLAN. type="
+                        + transportType);
+        }
+
+        // Read package name from resource overlay
+        className = mPhone.getContext().getResources().getString(resourceId);
+
+        PersistableBundle b = mCarrierConfigManager.getConfigForSubId(mPhone.getSubId());
+
+        if (b != null && !TextUtils.isEmpty(b.getString(carrierConfig))) {
+            // If carrier config overrides it, use the one from carrier config
+            className = b.getString(carrierConfig, className);
+        }
+
+        return className;
+    }
+
     private void sendCompleteMessage(Message msg, int code) {
         if (msg != null) {
             msg.arg1 = code;
@@ -433,11 +526,13 @@ public class DataServiceManager extends Handler {
             return;
         }
 
-        CellularDataServiceCallback callback = new CellularDataServiceCallback();
+        CellularDataServiceCallback callback = new CellularDataServiceCallback("setupDataCall");
         if (onCompleteMessage != null) {
             mMessageMap.put(callback.asBinder(), onCompleteMessage);
         }
         try {
+            sendMessageDelayed(obtainMessage(EVENT_WATCHDOG_TIMEOUT, callback),
+                    REQUEST_UNRESPONDED_TIMEOUT);
             mIDataService.setupDataCall(mPhone.getPhoneId(), accessNetworkType, dataProfile,
                     isRoaming, allowRoaming, reason, linkProperties, callback);
         } catch (RemoteException e) {
@@ -468,11 +563,14 @@ public class DataServiceManager extends Handler {
             return;
         }
 
-        CellularDataServiceCallback callback = new CellularDataServiceCallback();
+        CellularDataServiceCallback callback =
+                new CellularDataServiceCallback("deactivateDataCall");
         if (onCompleteMessage != null) {
             mMessageMap.put(callback.asBinder(), onCompleteMessage);
         }
         try {
+            sendMessageDelayed(obtainMessage(EVENT_WATCHDOG_TIMEOUT, callback),
+                    REQUEST_UNRESPONDED_TIMEOUT);
             mIDataService.deactivateDataCall(mPhone.getPhoneId(), cid, reason, callback);
         } catch (RemoteException e) {
             loge("Cannot invoke deactivateDataCall on data service.");
@@ -498,7 +596,8 @@ public class DataServiceManager extends Handler {
             return;
         }
 
-        CellularDataServiceCallback callback = new CellularDataServiceCallback();
+        CellularDataServiceCallback callback =
+                new CellularDataServiceCallback("setInitialAttachApn");
         if (onCompleteMessage != null) {
             mMessageMap.put(callback.asBinder(), onCompleteMessage);
         }
@@ -531,7 +630,7 @@ public class DataServiceManager extends Handler {
             return;
         }
 
-        CellularDataServiceCallback callback = new CellularDataServiceCallback();
+        CellularDataServiceCallback callback = new CellularDataServiceCallback("setDataProfile");
         if (onCompleteMessage != null) {
             mMessageMap.put(callback.asBinder(), onCompleteMessage);
         }
@@ -558,7 +657,8 @@ public class DataServiceManager extends Handler {
             return;
         }
 
-        CellularDataServiceCallback callback = new CellularDataServiceCallback();
+        CellularDataServiceCallback callback =
+                new CellularDataServiceCallback("requestDataCallList");
         if (onCompleteMessage != null) {
             mMessageMap.put(callback.asBinder(), onCompleteMessage);
         }

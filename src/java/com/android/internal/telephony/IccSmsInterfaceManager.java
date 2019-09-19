@@ -178,17 +178,17 @@ public class IccSmsInterfaceManager {
         int count = messages.size();
 
         for (int i = 0; i < count; i++) {
-             byte[] ba = messages.get(i);
-             if (ba[0] == STATUS_ON_ICC_UNREAD) {
-                 int n = ba.length;
-                 byte[] nba = new byte[n - 1];
-                 System.arraycopy(ba, 1, nba, 0, n - 1);
-                 byte[] record = makeSmsRecordData(STATUS_ON_ICC_READ, nba);
-                 fh.updateEFLinearFixed(IccConstants.EF_SMS, i + 1, record, null, null);
-                 if (Rlog.isLoggable("SMS", Log.DEBUG)) {
-                     log("SMS " + (i + 1) + " marked as read");
-                 }
-             }
+            byte[] ba = messages.get(i);
+            if ((ba[0] & 0x07) == STATUS_ON_ICC_UNREAD) {
+                int n = ba.length;
+                byte[] nba = new byte[n - 1];
+                System.arraycopy(ba, 1, nba, 0, n - 1);
+                byte[] record = makeSmsRecordData(STATUS_ON_ICC_READ, nba);
+                fh.updateEFLinearFixed(IccConstants.EF_SMS, i + 1, record, null, null);
+                if (Rlog.isLoggable("SMS", Log.DEBUG)) {
+                    log("SMS " + (i + 1) + " marked as read");
+                }
+            }
         }
     }
 
@@ -287,8 +287,7 @@ public class IccSmsInterfaceManager {
                 mPhone.mCi.writeSmsToSim(status, IccUtils.bytesToHexString(smsc),
                         IccUtils.bytesToHexString(pdu), response);
             } else {
-                mPhone.mCi.writeSmsToRuim(status, IccUtils.bytesToHexString(pdu),
-                        response);
+                mPhone.mCi.writeSmsToRuim(status, pdu, response);
             }
 
             try {
@@ -786,7 +785,7 @@ public class IccSmsInterfaceManager {
         }
 
         // Status bits for this record.  See TS 51.011 10.5.3
-        data[0] = (byte)(status & 7);
+        data[0] = (byte) (status & 0x07);
 
         System.arraycopy(pdu, 0, data, 1, pdu.length);
 
@@ -807,6 +806,9 @@ public class IccSmsInterfaceManager {
     }
 
     public boolean enableCellBroadcastRange(int startMessageId, int endMessageId, int ranType) {
+        mContext.enforceCallingPermission("android.permission.RECEIVE_EMERGENCY_BROADCAST",
+                "enabling cell broadcast range [" + startMessageId + "-" + endMessageId + "]. "
+                        + "ranType=" + ranType);
         if (ranType == SmsManager.CELL_BROADCAST_RAN_TYPE_GSM) {
             return enableGsmBroadcastRange(startMessageId, endMessageId);
         } else if (ranType == SmsManager.CELL_BROADCAST_RAN_TYPE_CDMA) {
@@ -817,6 +819,9 @@ public class IccSmsInterfaceManager {
     }
 
     public boolean disableCellBroadcastRange(int startMessageId, int endMessageId, int ranType) {
+        mContext.enforceCallingPermission("android.permission.RECEIVE_EMERGENCY_BROADCAST",
+                "disabling cell broadcast range [" + startMessageId + "-" + endMessageId
+                        + "]. ranType=" + ranType);
         if (ranType == SmsManager.CELL_BROADCAST_RAN_TYPE_GSM ) {
             return disableGsmBroadcastRange(startMessageId, endMessageId);
         } else if (ranType == SmsManager.CELL_BROADCAST_RAN_TYPE_CDMA)  {

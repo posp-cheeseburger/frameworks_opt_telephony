@@ -172,8 +172,8 @@ public class PhoneFactory {
                 sUiccController = UiccController.make(context, sCommandsInterfaces);
 
                 Rlog.i(LOG_TAG, "Creating SubscriptionController");
-                SubscriptionController.init(context, sCommandsInterfaces);
-                MultiSimSettingController.init(context, SubscriptionController.getInstance());
+                SubscriptionController sc = SubscriptionController.init(context);
+                MultiSimSettingController.init(context, sc);
 
                 if (context.getPackageManager().hasSystemFeature(
                         PackageManager.FEATURE_TELEPHONY_EUICC)) {
@@ -226,8 +226,7 @@ public class PhoneFactory {
                 Rlog.i(LOG_TAG, "Creating SubInfoRecordUpdater ");
                 sSubInfoRecordUpdater = new SubscriptionInfoUpdater(
                         BackgroundThread.get().getLooper(), context, sPhones, sCommandsInterfaces);
-                SubscriptionController.getInstance().updatePhonesAvailability(sPhones);
-
+                sc.updatePhonesAvailability(sPhones);
 
                 // Only bring up IMS if the device supports having an IMS stack.
                 if (context.getPackageManager().hasSystemFeature(
@@ -243,7 +242,7 @@ public class PhoneFactory {
                     Rlog.i(LOG_TAG, "ImsResolver: defaultImsPackage: " + defaultImsPackage);
                     sImsResolver = new ImsResolver(sContext, defaultImsPackage, numPhones,
                             isDynamicBinding);
-                    sImsResolver.initPopulateCacheAndStartBind();
+                    sImsResolver.initialize();
                     // Start monitoring after defaults have been made.
                     // Default phone must be ready before ImsPhone is created because ImsService
                     // might need it when it is being opened. This should initialize multiple
@@ -257,7 +256,6 @@ public class PhoneFactory {
 
                 ITelephonyRegistry tr = ITelephonyRegistry.Stub.asInterface(
                         ServiceManager.getService("telephony.registry"));
-                SubscriptionController sc = SubscriptionController.getInstance();
 
                 sSubscriptionMonitor = new SubscriptionMonitor(tr, sContext, sc, numPhones);
 
@@ -279,7 +277,6 @@ public class PhoneFactory {
 
                 sNotificationChannelController = new NotificationChannelController(context);
 
-                sTelephonyNetworkFactories = new TelephonyNetworkFactory[numPhones];
                 for (int i = 0; i < numPhones; i++) {
                     sTelephonyNetworkFactories[i] = new TelephonyNetworkFactory(
                             sSubscriptionMonitor, Looper.myLooper(), sPhones[i]);
@@ -538,6 +535,16 @@ public class PhoneFactory {
             pw.decreaseIndent();
             pw.println("++++++++++++++++++++++++++++++++");
         }
+
+        pw.println("ImsResolver:");
+        pw.increaseIndent();
+        try {
+            if (sImsResolver != null) sImsResolver.dump(fd, pw, args);
+        } catch (Exception e) {
+            e.printStackTrace();
+        }
+        pw.decreaseIndent();
+        pw.println("++++++++++++++++++++++++++++++++");
 
         pw.println("SubscriptionMonitor:");
         pw.increaseIndent();

@@ -20,6 +20,7 @@ import android.annotation.UnsupportedAppUsage;
 import android.app.ActivityManager;
 import android.content.Context;
 import android.content.res.Configuration;
+import android.icu.util.ULocale;
 import android.os.Build;
 import android.os.RemoteException;
 import android.os.SystemProperties;
@@ -28,9 +29,6 @@ import android.util.Slog;
 
 import com.android.internal.app.LocaleStore;
 import com.android.internal.app.LocaleStore.LocaleInfo;
-
-import libcore.icu.ICU;
-import libcore.timezone.TimeZoneFinder;
 
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -96,7 +94,8 @@ public final class MccTable {
             return null;
         }
         final String lowerCaseCountryCode = entry.mIso;
-        return TimeZoneFinder.getInstance().lookupDefaultTimeZoneIdByCountry(lowerCaseCountryCode);
+        TimeZoneLookupHelper timeZoneLookupHelper = new TimeZoneLookupHelper();
+        return timeZoneLookupHelper.lookupDefaultTimeZoneIdByCountry(lowerCaseCountryCode);
     }
 
     /**
@@ -149,7 +148,7 @@ public final class MccTable {
         }
 
         // Ask CLDR for the language this country uses...
-        Locale likelyLocale = ICU.addLikelySubtags(new Locale("und", country));
+        ULocale likelyLocale = ULocale.addLikelySubtags(new ULocale("und", country));
         String likelyLanguage = likelyLocale.getLanguage();
         Slog.d(LOG_TAG, "defaultLanguageForMcc(" + mcc + "): country " + country + " uses " +
                likelyLanguage);
@@ -358,25 +357,12 @@ public final class MccTable {
      * @param mcc Mobile Country Code of the SIM or SIM-like entity (build prop on CDMA)
      */
     private static void setTimezoneFromMccIfNeeded(Context context, int mcc) {
-        // Switch to use the time service helper associated with the NitzStateMachine impl
-        // being used. This logic will be removed once the old implementation is removed.
-        if (TelephonyComponentFactory.USE_NEW_NITZ_STATE_MACHINE) {
-            if (!NewTimeServiceHelper.isTimeZoneSettingInitializedStatic()) {
-                String zoneId = defaultTimeZoneForMcc(mcc);
-                if (zoneId != null && zoneId.length() > 0) {
-                    // Set time zone based on MCC
-                    NewTimeServiceHelper.setDeviceTimeZoneStatic(context, zoneId);
-                    Slog.d(LOG_TAG, "timezone set to " + zoneId);
-                }
-            }
-        } else {
-            if (!OldTimeServiceHelper.isTimeZoneSettingInitializedStatic()) {
-                String zoneId = defaultTimeZoneForMcc(mcc);
-                if (zoneId != null && zoneId.length() > 0) {
-                    // Set time zone based on MCC
-                    OldTimeServiceHelper.setDeviceTimeZoneStatic(context, zoneId);
-                    Slog.d(LOG_TAG, "timezone set to " + zoneId);
-                }
+        if (!TimeServiceHelper.isTimeZoneSettingInitializedStatic()) {
+            String zoneId = defaultTimeZoneForMcc(mcc);
+            if (zoneId != null && zoneId.length() > 0) {
+                // Set time zone based on MCC
+                TimeServiceHelper.setDeviceTimeZoneStatic(context, zoneId);
+                Slog.d(LOG_TAG, "timezone set to " + zoneId);
             }
         }
     }

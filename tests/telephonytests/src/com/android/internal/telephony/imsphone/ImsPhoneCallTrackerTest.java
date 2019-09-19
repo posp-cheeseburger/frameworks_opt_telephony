@@ -385,6 +385,31 @@ public class ImsPhoneCallTrackerTest extends TelephonyTest {
 
     @Test
     @SmallTest
+    public void testImsHoldException() throws Exception {
+        testImsMTCallAccept();
+        doThrow(new ImsException()).when(mImsCall).hold();
+        try {
+            mCTUT.holdActiveCall();
+            Assert.fail("No exception thrown");
+        } catch (Exception e) {
+            // expected
+            verify(mImsCall).hold();
+        }
+
+        // After the first hold exception, try holding (successfully) again to make sure that it
+        // goes through
+        doNothing().when(mImsCall).hold();
+        try {
+            mCTUT.holdActiveCall();
+            verify(mImsCall, times(2)).hold();
+        } catch (Exception ex) {
+            ex.printStackTrace();
+            Assert.fail("unexpected exception thrown" + ex.getMessage());
+        }
+    }
+
+    @Test
+    @SmallTest
     public void testImsMTCallReject() {
         testImsMTCall();
         assertTrue(mCTUT.mRingingCall.isRinging());
@@ -910,14 +935,22 @@ public class ImsPhoneCallTrackerTest extends TelephonyTest {
 
     @Test
     @SmallTest
-    public void testNumericOnlyRemap() {
-        assertEquals(ImsReasonInfo.CODE_SIP_FORBIDDEN, mCTUT.maybeRemapReasonCode(
-                new ImsReasonInfo(ImsReasonInfo.CODE_USER_TERMINATED_BY_REMOTE, 0)));
-        assertEquals(ImsReasonInfo.CODE_SIP_FORBIDDEN, mCTUT.maybeRemapReasonCode(
-                new ImsReasonInfo(ImsReasonInfo.CODE_USER_TERMINATED_BY_REMOTE, 0, "")));
+    public void testMergeComplete() {
+        boolean[] result = new boolean[1];
+        // Place a call.
+        ImsPhoneConnection connection = placeCallAndMakeActive();
+        connection.addListener(new Connection.ListenerBase() {
+            @Override
+            public void onConnectionEvent(String event, Bundle extras) {
+                result[0] = android.telecom.Connection.EVENT_MERGE_COMPLETE.equals(event);
+            }
+        });
+        ImsCall call = connection.getImsCall();
+        call.getListener().onCallMerged(call, null, false);
+        assertTrue(result[0]);
     }
 
-    private void placeCallAndMakeActive() {
+    private ImsPhoneConnection placeCallAndMakeActive() {
         try {
             doAnswer(new Answer<ImsCall>() {
                 @Override
@@ -950,6 +983,7 @@ public class ImsPhoneCallTrackerTest extends TelephonyTest {
                 new ImsStreamMediaProfile());
         imsCall.getImsCallSessionListenerProxy().callSessionStarted(imsCall.getSession(),
                 new ImsCallProfile());
+        return connection;
     }
 }
 
